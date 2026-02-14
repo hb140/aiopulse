@@ -733,8 +733,7 @@ class Hub:
                 del self.protocol
                 self.protocol = aiopulse.transport.HubTransportTcp(self.host)
             finally:
-                if self.handshake.is_set():
-                    await self.disconnect()
+                await self.disconnect()
                 if self.running:
                     delay = min(5 * (2 ** consecutive_failures), 60)
                     _LOGGER.info(f"{self.host}: Reconnecting in {delay}s")
