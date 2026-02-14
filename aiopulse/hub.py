@@ -26,11 +26,9 @@ _LOGGER = logging.getLogger(__name__)
 class Hub:
     """Representation of an Acmeda Pulse Hub."""
 
-    def __init__(
-        self, host=None, loop: Optional[asyncio.events.AbstractEventLoop] = None
-    ):
+    def __init__(self, host=None, enable_health_tasks=True):
         """Init the hub."""
-        self.loop: asyncio.events.AbstractEventLoop = loop or asyncio.get_event_loop()
+        self.enable_health_tasks = enable_health_tasks
         self.topic = str.encode("Smart_Id1_y:")
         self.sequence = 4
         self.handshake = asyncio.Event()
@@ -92,12 +90,13 @@ class Hub:
         while isinstance(check_target, functools.partial):
             check_target = check_target.func
 
+        loop = asyncio.get_running_loop()
         if asyncio.iscoroutine(check_target):
-            task = self.loop.create_task(target)  # type: ignore
+            task = loop.create_task(target)  # type: ignore
         elif asyncio.iscoroutinefunction(check_target):
-            task = self.loop.create_task(target(*args))
+            task = loop.create_task(target(*args))
         else:
-            task = self.loop.run_in_executor(None, target, *args)  # type: ignore
+            task = loop.run_in_executor(None, target, *args)  # type: ignore
 
         return task
 
@@ -107,9 +106,7 @@ class Hub:
             self.async_add_job(callback, update_type)
 
     @staticmethod
-    async def discover(
-        timeout=5, loop: Optional[asyncio.events.AbstractEventLoop] = None
-    ):
+    async def discover(timeout=5):
         """Use a broadcast udp packet to find hubs on the lan."""
         discover_client = aiopulse.transport.HubTransportUdpBroadcast()
 
@@ -135,7 +132,7 @@ class Hub:
                         if addr and addr not in hubs:
                             _LOGGER.info(f"{addr[0]}: Discovered hub on port {addr[1]}")
                             try:
-                                hub = Hub(addr[0], loop)
+                                hub = Hub(addr[0])
                                 discover_client.send(
                                     const.HEADER + const.COMMAND_DISCOVER
                                 )
@@ -228,6 +225,17 @@ class Hub:
         _LOGGER.debug(f"{self.host}: Disconnecting")
         await self.protocol.close()
         self.handshake.clear()
+        # Release locks to prevent deadlocks on reconnection
+        if self.command_lock.locked():
+            try:
+                self.command_lock.release()
+            except RuntimeError:
+                pass
+        if self.health_lock.locked():
+            try:
+                self.health_lock.release()
+            except RuntimeError:
+                pass
         _LOGGER.info(f"{self.host}: Disconnected")
 
     async def get_response(self, target_response=None):
@@ -654,12 +662,14 @@ class Hub:
         await self.command_lock.acquire()
 
         attempt = 0
+        success = False
         while attempt < retries:
             self.protocol.send(buffer)
 
             try:
                 await asyncio.wait_for(self.command_lock.acquire(), timeout=timeout)
                 _LOGGER.info(f"{self.host}: command successful.")
+                success = True
                 break
             except asyncio.TimeoutError:
                 attempt += 1
@@ -667,6 +677,11 @@ class Hub:
 
         if self.command_lock.locked():
             self.command_lock.release()
+
+        if not success:
+            raise errors.CommandTimeoutError(
+                f"{self.host}: command failed after {retries} retries"
+            )
 
     async def send_healthcheck(self, command, message_type, message):
         """Send payload to the hub."""
@@ -687,27 +702,30 @@ class Hub:
         """Start hub by connecting then awaiting for messages.
 
         Runs until the stop() method is called.
+        Uses exponential backoff for reconnection delays.
         """
         if self.running:
             _LOGGER.warning(f"{self.host}: Already running")
             return
         self.running = True
+        consecutive_failures = 0
         while self.running:
             try:
                 _LOGGER.info(f"{self.host}: Connecting")
                 await self.connect()
-                # await self.update()
+                consecutive_failures = 0
                 self.async_add_job(self.update)
                 await self.response_parser()
             except errors.CannotConnectException as inst:
+                consecutive_failures += 1
                 _LOGGER.warning(f"{self.host}: Connect failed {inst}")
             except errors.InvalidResponseException as inst:
                 _LOGGER.warning(f"{self.host}: Handshake failed {inst}")
                 await self.disconnect()
-            except errors.InvalidResponseException as inst:
-                _LOGGER.warning(f"{self.host}: Protocol error {inst}")
             except errors.NotConnectedException:
                 _LOGGER.debug(f"{self.host}: Disconnected, stopping parser")
+            except errors.CommandTimeoutError:
+                _LOGGER.warning(f"{self.host}: Command timeout during run")
             except OSError as inst:
                 _LOGGER.warning(f"{self.host}: Unexpected protocol failure: {inst}")
             except Exception as inst:
@@ -718,7 +736,9 @@ class Hub:
                 if self.handshake.is_set():
                     await self.disconnect()
                 if self.running:
-                    await asyncio.sleep(5)
+                    delay = min(5 * (2 ** consecutive_failures), 60)
+                    _LOGGER.info(f"{self.host}: Reconnecting in {delay}s")
+                    await asyncio.sleep(delay)
         _LOGGER.debug(f"{self.host}: Stopped")
 
     async def stop(self):

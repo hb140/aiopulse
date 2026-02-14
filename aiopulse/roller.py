@@ -28,10 +28,14 @@ class Roller:
         self.update_callbacks: List[Callable] = []
 
         self.health_lock = asyncio.Lock()
-        self.health_task = hub.async_add_job(self.health_updater)
+        if hub.enable_health_tasks:
+            self.health_task = hub.async_add_job(self.health_updater)
+        else:
+            self.health_task = None
 
     def __del__(self):
-        self.health_task.cancel()
+        if self.health_task is not None:
+            self.health_task.cancel()
 
     def health_updated(self):
         try:

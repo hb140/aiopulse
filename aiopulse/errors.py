@@ -29,3 +29,9 @@ class InvalidResponseException(HubBaseException):
     """Exception thrown when an invalid response is received."""
 
     pass
+
+
+class CommandTimeoutError(HubBaseException):
+    """Exception thrown when a command times out after all retries."""
+
+    pass

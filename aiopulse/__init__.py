@@ -8,6 +8,7 @@ from aiopulse.scene import Scene
 from aiopulse.timer import Timer
 from aiopulse.errors import (
     CannotConnectException,
+    CommandTimeoutError,
     NotConnectedException,
     NotRunningException,
     InvalidResponseException,
@@ -21,12 +22,13 @@ __all__ = [
     "Scene",
     "Timer",
     "CannotConnectException",
+    "CommandTimeoutError",
     "NotConnectedException",
     "NotRunningException",
     "InvalidResponseException",
     "UpdateType",
 ]
-__version__ = "0.4.6"
+__version__ = "0.5.0"
 __author__ = "Alan Murray"
 
 _LOGGER = logging.getLogger(__name__)

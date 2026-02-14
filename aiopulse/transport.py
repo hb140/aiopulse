@@ -48,7 +48,7 @@ class HubTransportUdp(HubTransportBase):
         if host:
             self.host = host
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self.transport, self.protocol = await loop.create_datagram_endpoint(
             lambda: self,
             remote_addr=(self.host, self.port),
@@ -87,7 +87,7 @@ class HubTransportUdpBroadcast(HubTransportUdp):
 
         sock.sendto(b"0", ("<broadcast>", 1500))
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self.transport, self.protocol = await loop.create_datagram_endpoint(
             lambda: self,
             sock=sock,
@@ -105,24 +105,16 @@ class HubTransportTcp(HubTransportBase):
         self.reader = None
         self.writer = None
         self.transport = None
-        self.protocol = None
         self.is_udp = False
         self.connect_task = None
         super().__init__()
 
     async def do_connection(self):
         """Try and establish a TCP connection."""
-        loop = asyncio.get_event_loop()
-        self.reader = asyncio.StreamReader(loop=loop)
-        self.protocol = asyncio.StreamReaderProtocol(self.reader, loop=loop)
-
-        # The following blocks until a connection is made
-        self.transport, _ = await loop.create_connection(
-            lambda: self, self.host, self.port
+        self.reader, self.writer = await asyncio.open_connection(
+            self.host, self.port
         )
-        self.writer = asyncio.StreamWriter(
-            self.transport, self.protocol, self.reader, loop
-        )
+        self.transport = self.writer.transport
 
     async def connect(self, host=None):
         """Init connection."""
@@ -146,22 +138,15 @@ class HubTransportTcp(HubTransportBase):
             if self.writer:
                 self.writer.close()
                 await self.writer.wait_closed()
-                _LOGGER.debug(f"{self.host}: TCP buffer cleared.")
-        except Exception as inst:
-            _LOGGER.warning(f"{self.host}: Error closing writer cleanly: {inst}")
-        finally:
-            self.writer = None
-
-        try:
-            if self.transport:
-                self.transport.close()
                 _LOGGER.debug(f"{self.host}: TCP connection closed.")
             elif self.connect_task and not self.connect_task.done():
                 self.connect_task.cancel()
-            else:
-                _LOGGER.warning(f"{self.host}: Not connected")
         except Exception as inst:
-            _LOGGER.warning(f"{self.host}: Error closing TCP socket cleanly: {inst}")
+            _LOGGER.warning(f"{self.host}: Error closing connection cleanly: {inst}")
+        finally:
+            self.writer = None
+            self.reader = None
+            self.transport = None
 
     def send(self, buffer):
         """Abstraction of the underlying transport to send a buffer."""
@@ -173,18 +158,12 @@ class HubTransportTcp(HubTransportBase):
         """Receive from stream."""
         if self.writer.is_closing():
             raise NotConnectedException
-        return await self.reader.read(65535)
-
-    def data_received(self, data):
-        """Callback when data has been received."""
-        self.protocol.data_received(data)
-
-    def connection_made(self, transport):
-        """Callback when a connection has been made."""
-        self.protocol.connection_made(transport)
-        super().connection_made(transport)
+        data = await self.reader.read(65535)
+        if not data:
+            raise NotConnectedException
+        return data
 
     def connection_lost(self, exc):
         """Callback when a connection is lost."""
-        self.protocol.connection_lost(exc)
+        _LOGGER.debug(f"{self.host}: TCP connection lost: {exc}")
         super().connection_lost(exc)
