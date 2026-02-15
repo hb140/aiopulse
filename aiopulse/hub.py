@@ -621,19 +621,29 @@ class Hub:
     async def response_parser(self):
         """Receive a response from the hub and work out what message it is."""
         _LOGGER.debug(f"{self.host}: Starting response parser")
+        ping_pending = False
         while self.handshake.is_set():
             """Only catch exceptions that can be recovered from without reconnecting"""
             try:
                 with async_timeout.timeout(30):
                     response = await self.get_response()
+                ping_pending = False  # Data received, connection is alive
                 if len(response) > 0:
                     self.response_parse(response)
             except asyncio.TimeoutError:
+                if ping_pending:
+                    # We already sent a ping last cycle with no response — connection is dead
+                    _LOGGER.debug(
+                        f"{self.host}: No ping response received, connection is dead"
+                    )
+                    raise errors.NotConnectedException
                 _LOGGER.debug(f"{self.host}: Receive timeout, sending ping keepalive")
                 self.protocol.send(const.HEADER + const.COMMAND_PING)
+                ping_pending = True
             except errors.InvalidResponseException:
                 _LOGGER.debug(f"{self.host}: Invalid response, sending ping keepalive")
                 self.protocol.send(const.HEADER + const.COMMAND_PING)
+                ping_pending = True
 
     async def update(self):
         """Update all hub information (includes scenes, rooms, and rollers)."""
